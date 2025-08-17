@@ -1,18 +1,20 @@
+# -------- base --------
 FROM python:3.11-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+# install python deps
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# app code
 COPY server ./server
 COPY web ./web
 COPY scraper ./scraper
 COPY indexer ./indexer
-COPY data ./data
+
+# make sure data dir exists even if it's not in git
+RUN mkdir -p /app/data
 
 EXPOSE 8000
 
