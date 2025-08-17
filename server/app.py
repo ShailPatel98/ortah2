@@ -1,41 +1,23 @@
-import os
-import re
-import json
-import time
-from typing import List, Optional, Dict, Any
+import os, re, time
+from pathlib import Path
+from typing import Dict, Any, List, Optional
 
-from fastapi import FastAPI, Request, Body
+from fastapi import FastAPI, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from pydantic import BaseModel
 
-import requests
-
-# OpenAI (python SDK v1.x)
-from openai import OpenAI
-
-# Pinecone v3
-from pinecone import Pinecone
-
-# ---------------- Env ----------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# ---- Env ----
 OPENAI_MODEL_CHAT = os.getenv("OPENAI_MODEL_CHAT", "gpt-4o-mini")
 OPENAI_MODEL_EMBED = os.getenv("OPENAI_MODEL_EMBED", "text-embedding-3-small")
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
+BASE_URL = os.getenv("BASE_URL", "https://ortahaus.com")
+ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
+PORT = int(os.getenv("PORT", "8000"))
 PINECONE_INDEX = os.getenv("PINECONE_INDEX", "ortahaus")
 PINECONE_NAMESPACE = os.getenv("PINECONE_NAMESPACE", "prod")
-ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "*").split(",")]
-BASE_URL = os.getenv("BASE_URL", "https://ortahaus.com")
 
-# ---------------- Clients ----------------
-oai = OpenAI(api_key=OPENAI_API_KEY or None)
-pc = Pinecone(api_key=PINECONE_API_KEY or None)
-index = pc.Index(PINECONE_INDEX)
-
-# ---------------- App ----------------
 app = FastAPI(title="Ortahaus Product Guide")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else ["*"],
@@ -44,154 +26,155 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# serve static UI from /web
-static_dir = os.path.join(os.path.dirname(__file__), "..", "web")
-static_dir = os.path.abspath(static_dir)
-if os.path.isdir(static_dir):
-    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+# Serve /ui from /web
+WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+INDEX_HTML = WEB_DIR / "index.html"
 
-# simple in-memory session store
-SESSIONS: Dict[str, Dict[str, Any]] = {}
+@app.get("/ui", response_class=HTMLResponse)
+def ui():
+    if INDEX_HTML.exists():
+        return INDEX_HTML.read_text(encoding="utf-8")
+    return HTMLResponse("<h1>UI not found</h1><p>Put index.html under /web.</p>", status_code=500)
 
-def get_session(session_id: str) -> Dict[str, Any]:
-    if session_id not in SESSIONS:
-        SESSIONS[session_id] = {
-            "created_at": time.time(),
-            "hair_type": None,
-            "concern": None,
-            "finish_or_hold": None,
-            "history": [],
-        }
-    return SESSIONS[session_id]
+@app.get("/favicon.ico")
+def favicon():
+    ico = WEB_DIR / "favicon.ico"
+    if ico.exists():
+        return FileResponse(ico)
+    return JSONResponse({"detail": "no favicon"}, status_code=404)
 
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
 
-@app.get("/ui")
-def ui():
-    # Lightweight guard to help devs if /static/index.html is missing
-    index_path = os.path.join(static_dir, "index.html")
-    if os.path.isfile(index_path):
-        return FileResponse(index_path, media_type="text/html")
-    return HTMLResponse("<h1>UI not found</h1><p>Put your <code>index.html</code> under <code>/web</code>.</p>", status_code=404)
+# ---- lazy clients (no network at import) ----
+_openai = None
+_index = None
+def get_openai():
+    global _openai
+    if _openai is None:
+        from openai import OpenAI
+        _openai = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    return _openai
 
-# ---------------- Helpers ----------------
+def get_index():
+    global _index
+    if _index is None:
+        from pinecone import Pinecone
+        _index = Pinecone(api_key=os.environ["PINECONE_API_KEY"]).Index(PINECONE_INDEX)
+    return _index
 
-HAIR_TYPES = {"straight","wavy","curly","coily","fine","thick","thin","medium"}
-CONCERNS = {
-    "volume":"volume",
-    "volumize":"volume",
-    "hold":"hold",
-    "strong hold":"hold",
-    "matte":"matte",
-    "shine":"shine",
-    "gloss":"shine",
+# ---- tiny session store ----
+SESSIONS: Dict[str, Dict[str, Any]] = {}
+def get_session(session_id: Optional[str]) -> Dict[str, Any]:
+    sid = session_id or "default"
+    if sid not in SESSIONS:
+        SESSIONS[sid] = {
+            "created_at": time.time(),
+            "hair_type": None,
+            "concern": None,
+            "history": [],
+        }
+    return SESSIONS[sid]
+
+# ---- extraction helpers ----
+HAIR_TYPES = ["straight","wavy","curly","coily","fine","thick","thin"]
+CONCERN_SYNONYMS = {
     "frizz":"frizz",
+    "frizzy":"frizz",
+    "volume":"volume","volumize":"volume","lift":"volume",
+    "hold":"hold","strong hold":"hold","control":"hold",
+    "shine":"shine","gloss":"shine",
+    "texture":"texture","grit":"texture",
+    "hydrate":"hydration","hydration":"hydration","moisture":"hydration","dry":"hydration","dryness":"hydration",
+    "oily":"oil control","greasy":"oil control","oil":"oil control",
     "definition":"definition",
-    "hydrate":"hydration",
-    "hydration":"hydration",
-    "moisture":"hydration",
-    "oily":"oil control",
-    "greasy":"oil control",
-    "sweat":"sweat",
-    "texture":"texture",
 }
 
 def pick_hair_type(text: str) -> Optional[str]:
     t = text.lower()
-    for h in sorted(HAIR_TYPES, key=len, reverse=True):
-        if re.search(rf"\\b{re.escape(h)}\\b", t):
-            return "thin" if h == "fine" else h
+    for ht in HAIR_TYPES:
+        if re.search(rf"\b{re.escape(ht)}\b", t):
+            return "thin" if ht == "fine" else ht
     return None
 
 def pick_concern(text: str) -> Optional[str]:
     t = text.lower()
-    for k,v in CONCERNS.items():
-        if re.search(rf"\\b{re.escape(k)}\\b", t):
+    for k, v in CONCERN_SYNONYMS.items():
+        if re.search(rf"\b{re.escape(k)}\b", t):
             return v
     return None
 
-def embedding(text: str) -> List[float]:
-    resp = oai.embeddings.create(model=OPENAI_MODEL_EMBED, input=text)
-    return resp.data[0].embedding
+def embed(query: str) -> List[float]:
+    return get_openai().embeddings.create(model=OPENAI_MODEL_EMBED, input=query).data[0].embedding
 
-def search_products(query: str, top_k: int = 6) -> List[Dict[str, Any]]:
-    vec = embedding(query)
-    res = index.query(
-        namespace=PINECONE_NAMESPACE,
-        vector=vec,
-        top_k=top_k,
-        include_metadata=True,
-    )
-    hits = []
-    for m in res.matches or []:
-        md = m.get("metadata", {}) if isinstance(m, dict) else (m.metadata or {})
-        hits.append({
-            "id": getattr(m, "id", None) or md.get("url") or "",
-            "score": m.get("score") if isinstance(m, dict) else getattr(m, "score", None),
-            "title": md.get("title") or "",
-            "url": md.get("url") or "",
-            "how_to_use": md.get("how_to_use") or "",
-            "ingredients": md.get("ingredients") or "",
-            "bullets": md.get("bullets") or [],
+def pinecone_search(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    vec = embed(query)
+    res = get_index().query(vector=vec, top_k=top_k, namespace=PINECONE_NAMESPACE, include_metadata=True)
+    matches = getattr(res, "matches", None) or []
+    out = []
+    for m in matches:
+        md = m.metadata if hasattr(m, "metadata") else m.get("metadata", {})  # SDK compat
+        out.append({
+            "title": (md or {}).get("title") or "",
+            "url": (md or {}).get("url") or "",
+            "how_to_use": (md or {}).get("how_to_use") or "",
+            "ingredients": (md or {}).get("ingredients") or "",
+            "bullets": (md or {}).get("bullets") or [],
+            "score": float(getattr(m, "score", 0.0) or m.get("score", 0.0)),
         })
-    return hits
+    return out
 
-def craft_reply(name: str, url: str, how_to: str = "", ingredients: str = "") -> str:
-    link = f'<a href="{url}" target="_blank" rel="noopener" class="rec-link">{name}</a>'
-    parts = [f"I'd go with {link}."]
-    if how_to:
-        parts.append(f"How to use: {how_to.strip()}")
-    if ingredients:
-        parts.append(f"Key ingredients: {ingredients.strip()}")
-    parts.append("Want a different finish or hold? I can tweak the rec.")
-    return " ".join(parts)
+def product_html(p: Dict[str, Any]) -> str:
+    link = f'<a href="{p["url"]}" target="_blank" rel="noopener" class="rec-link"><strong>{p["title"]}</strong></a>'
+    how = f" How to use: {p['how_to_use'].strip()}" if p.get("how_to_use") else ""
+    why = ""
+    if isinstance(p.get("bullets"), list) and p["bullets"]:
+        why = f" Why: {p['bullets'][0]}"
+    return f"I’d go with {link}.{why}{how}"
 
-SYSTEM_PROMPT = (
-    "You are the Ortahaus Product Guide. Be concise, friendly, and helpful. "
-    "Only recommend a single product when ready. Ask follow-up questions when details are missing. "
-    "Never mention that you will recommend 'two' products. Links should be returned as plain text; "
-    "the server will format them."
-)
+# ---- API ----
+class ChatIn(BaseModel):
+    message: str
+    session_id: Optional[str] = None
 
-# ---------------- Routes ----------------
 @app.post("/chat")
-async def chat(payload: Dict[str, Any] = Body(...)):
-    message = (payload.get("message") or "").strip()
-    session_id = payload.get("session_id") or "default"
-    state = get_session(session_id)
-    state["history"].append({"role": "user", "content": message})
+def chat(body: ChatIn, request: Request):
+    session = get_session(body.session_id)
+    user_msg = (body.message or "").strip()
+    session["history"].append({"role": "user", "content": user_msg})
 
-    # Extract signals
-    htype = pick_hair_type(message) or state.get("hair_type")
-    concern = pick_concern(message) or state.get("concern")
-    state["hair_type"] = htype
-    state["concern"] = concern
+    # slot fill
+    if not session.get("hair_type"):
+        ht = pick_hair_type(user_msg)
+        if ht: session["hair_type"] = ht
+    if not session.get("concern"):
+        c = pick_concern(user_msg)
+        if c: session["concern"] = c
 
-    # Ask for missing info (one at a time)
-    if not htype:
-        return {"reply": "Got it! What’s your hair type (straight, wavy, curly, or coily)?", "session_id": session_id}
-    if not concern:
-        return {"reply": "What’s your main goal today—volume, hold, frizz control, hydration, or shine?", "session_id": session_id}
+    if not session.get("hair_type"):
+        return {"reply": "Got it. What’s your hair type—straight, wavy, curly, or coily?"}
+    if not session.get("concern"):
+        return {"reply": f"Thanks! What’s your main goal for {session['hair_type']} hair—volume, hold, frizz control, shine, or hydration?"}
 
-    # We have enough to search
-    query = f"Ortahaus product for {htype} hair; primary concern: {concern}. Return best match."
-    hits = search_products(query, top_k=5)
+    # we have enough -> search
+    q = f"{session['hair_type']} hair; concern: {session['concern']}. Best Ortahaus product."
+    results = []
+    try:
+        results = pinecone_search(q, top_k=4)
+    except Exception:
+        pass
 
-    # pick first strong match with a product URL
-    candidate = next((h for h in hits if h["url"].startswith("https://")), hits[0] if hits else None)
+    if results:
+        reply_html = product_html(results[0])
+    else:
+        # graceful fallback if index is empty or Pinecone blocked
+        if session["concern"] in ("volume","texture"):
+            reply_html = product_html({"title":"Corriedale Powder","url":f"{BASE_URL}/products/corriedale-powder","how_to_use":"Tap a little at roots; tousle for lift.","bullets":["Instant matte volume without stiffness."]})
+        elif session["concern"] in ("frizz","definition","hydration") and session["hair_type"] in ("wavy","curly","coily"):
+            reply_html = product_html({"title":"Merino Cream","url":f"{BASE_URL}/products/merino-cream","how_to_use":"Apply to damp hair; scrunch and air-dry or diffuse.","bullets":["Controls frizz and defines curls with a soft finish."]})
+        else:
+            reply_html = product_html({"title":"Herdsman Cement","url":f"{BASE_URL}/products/herdsman-cement","how_to_use":"Emulsify a small dab in palms; apply to dry hair; comb or finger-style.","bullets":["Strong, all-day hold without crunch."]})
 
-    # Fallback text if no index yet
-    if not candidate:
-        return {
-            "reply": (
-                "I don't see the product index yet. Try running the scraper and indexer, "
-                "then ask me again. In the meantime: tell me if you prefer matte or shine?"
-            ),
-            "session_id": session_id,
-        }
-
-    reply = craft_reply(candidate["title"], candidate["url"], candidate.get("how_to_use",""), candidate.get("ingredients",""))
-    state["history"].append({"role": "assistant", "content": reply})
-    return {"reply": reply, "session_id": session_id, "debug": {"htype": htype, "concern": concern}}
+    session["history"].append({"role": "assistant", "content": reply_html})
+    return {"reply": reply_html}
