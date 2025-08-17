@@ -2,59 +2,120 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Ortahaus Product Guide</title>
   <style>
-    :root {
+    :root{
       --bg: #0b0b0b;
-      --fg: #fafafa;
-      --muted: #b8b8b8;
-      --accent: #63e6be;
-      --card: #141414;
-      --shadow: 0 12px 30px rgba(0,0,0,.35);
-      --radius: 16px;
+      --fg: #f7f7f7;
+      --muted:#b9b9b9;
+      --accent:#a7ffda;
+      --card:#141414;
+      --radius:16px;
+      --shadow:0 16px 40px rgba(0,0,0,.45);
+      --safe-top: env(safe-area-inset-top);
+      --safe-right: env(safe-area-inset-right);
+      --safe-bottom: env(safe-area-inset-bottom);
+      --safe-left: env(safe-area-inset-left);
     }
-    html,body{height:100%;}
-    body{margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, Inter, Helvetica, Arial, sans-serif;}
-    a{color:var(--fg);}
-    .wrap{max-width:860px;margin:6vh auto;padding:0 16px;}
-    .card{background:var(--card); border-radius:var(--radius); box-shadow:var(--shadow); overflow:hidden;}
-    header{padding:18px 20px; display:flex; align-items:center; gap:10px; border-bottom:1px solid #222;}
-    header img{width:26px;height:26px;filter:grayscale(1) invert(1);}
-    header h1{font-size:16px;margin:0;letter-spacing:.4px; text-transform:uppercase;}
-    .chat{height:62vh; overflow:auto; padding:16px;}
-    .m{display:flex; gap:10px; margin:10px 0; align-items:flex-start;}
-    .m.you{justify-content:flex-end;}
-    .bubble{max-width:70%; padding:12px 14px; border-radius:14px; background:#1e1e1e;}
-    .m.you .bubble{background:#202c24; border:1px solid #335b45;}
-    .meta{color:var(--muted); font-size:12px; margin-top:4px;}
-    .input{display:flex; gap:8px; padding:12px; border-top:1px solid #222; background:#0f0f0f;}
-    .input input{flex:1; border-radius:12px; padding:12px 14px; border:1px solid #333; background:#151515; color:#fff; outline:none;}
-    .input button{border:0; padding:0 16px; border-radius:12px; background:var(--accent); color:#000; font-weight:600; cursor:pointer;}
-    .rec-link{color:#a7ffda; text-decoration:underline;}
-    .floating{position:fixed; right:22px; bottom:22px; z-index:50;}
-    .fab{width:56px; height:56px; border-radius:50%; background:var(--accent); border:0; box-shadow:var(--shadow); cursor:pointer; font-weight:800;}
-    .widget{position:fixed; right:22px; bottom:90px; width:360px; max-width:calc(100vw - 40px); display:none;}
+    html,body{height:100%;background:var(--bg);color:var(--fg);margin:0;
+      font:16px/1.45 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, Helvetica, Arial;}
+    a{color:var(--accent);text-decoration:underline;}
+
+    /* Floating FAB */
+    .floating{
+      position:fixed;right:20px;bottom:20px;z-index:50;
+      padding-bottom:var(--safe-bottom,0);
+    }
+    .fab{
+      width:60px;height:60px;border-radius:50%;
+      background:var(--accent);color:#000;border:0;
+      font-weight:800;box-shadow:var(--shadow);cursor:pointer;
+    }
+
+    /* Widget container (desktop as card, mobile fullscreen) */
+    .widget{
+      position:fixed;right:20px;bottom:100px;width:380px;
+      max-width:calc(100vw - 40px);
+      display:none;z-index:55;
+    }
     .widget.open{display:block;}
+    .card{
+      background:var(--card);border-radius:20px;box-shadow:var(--shadow);
+      overflow:hidden;border:1px solid #222;
+    }
+    header{
+      padding:14px 16px;
+      padding-top:calc(14px + var(--safe-top,0));
+      display:flex;gap:10px;align-items:center;border-bottom:1px solid #222;
+    }
+    header img{width:24px;height:24px;filter:grayscale(1) invert(1);}
+    header h1{font-size:14px;letter-spacing:.4px;margin:0;text-transform:uppercase;}
+
+    .chat{
+      height:62vh;overflow:auto;padding:12px;
+      -webkit-overflow-scrolling:touch;
+    }
+    .m{display:flex;gap:10px;margin:10px 0;align-items:flex-start;}
+    .bubble{max-width:80%;padding:12px 14px;border-radius:14px;background:#1c1c1c;}
+    .m.you{justify-content:flex-end}
+    .m.you .bubble{background:#1f2a24;border:1px solid #2f5b48}
+    .rec-link{color:var(--accent);text-decoration:underline}
+    .input{
+      display:flex;gap:8px;padding:10px;border-top:1px solid #222;background:#0f0f0f;
+      padding-bottom:calc(10px + var(--safe-bottom,0));
+    }
+    .input input{
+      flex:1;border-radius:12px;padding:13px 14px;border:1px solid #333;background:#151515;color:#fff;outline:none;
+      font-size:16px; /* prevents iOS zoom-in */
+    }
+    .input button{
+      border:0;padding:0 16px;border-radius:12px;background:var(--accent);color:#000;font-weight:700;cursor:pointer;
+      min-width:72px;height:46px;
+    }
+
+    /* --- Mobile styles (≤ 480px) --- */
+    @media (max-width:480px){
+      .floating{right:16px;bottom:16px}
+      .fab{width:56px;height:56px}
+      .widget{
+        right:0;left:0;bottom:0;top:0;width:auto;max-width:none;
+        padding:0;margin:0;
+      }
+      .card{
+        border-radius:0;height:100dvh;display:flex;flex-direction:column;
+      }
+      .chat{
+        height:auto;flex:1;min-height:0;padding:14px;
+      }
+      header h1{font-size:13px}
+      .bubble{max-width:92%}
+    }
   </style>
 </head>
 <body>
   <div class="floating">
-    <button id="fab" class="fab">💬</button>
+    <button id="fab" class="fab" aria-label="Open chat">💬</button>
   </div>
-  <div id="widget" class="widget">
+
+  <div id="widget" class="widget" aria-live="polite">
     <div class="card">
       <header>
-        <img src="https://ortahaus.com/cdn/shop/files/32_Pixel_Favicon_Sheep_Logo.png" alt="logo">
-        <h1>Ortahaus Product Guide</h1>
+        <img src="https://ortahaus.com/cdn/shop/files/32_Pixel_Favicon_Sheep_Logo.png" alt="logo" />
+        <h1>ORTAHAUS PRODUCT GUIDE</h1>
       </header>
-      <div id="chat" class="chat"></div>
+
+      <div id="chat" class="chat" role="log" aria-label="Chat messages"></div>
+
       <div class="input">
-        <input id="msg" type="text" placeholder="Ask me anything about your hair…" />
+        <input id="msg" type="text" inputmode="text" autocomplete="off"
+               placeholder="Ask me about your hair…" aria-label="Message"/>
         <button id="send">Send</button>
       </div>
     </div>
   </div>
+
   <script src="/static/widget.js"></script>
 </body>
 </html>
