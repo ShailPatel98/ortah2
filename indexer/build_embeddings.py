@@ -1,74 +1,72 @@
-import os, json, math
-from typing import List, Dict, Any
+#!/usr/bin/env python3
+import os, json
+from typing import Any, Dict, List
 
 from openai import OpenAI
 from pinecone import Pinecone
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL_EMBED = os.getenv("OPENAI_MODEL_EMBED", "text-embedding-3-small")
-
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
-PINECONE_INDEX = os.getenv("PINECONE_INDEX", "ortahaus")
-PINECONE_NAMESPACE = os.getenv("PINECONE_NAMESPACE", "prod")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY","")
+OPENAI_MODEL_EMBED = os.getenv("OPENAI_MODEL_EMBED","text-embedding-3-small")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY","")
+PINECONE_INDEX = os.getenv("PINECONE_INDEX","ortahaus")
+PINECONE_NAMESPACE = os.getenv("PINECONE_NAMESPACE","prod")
 
 DATA_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "products.json"))
 
-oai = OpenAI(api_key=OPENAI_API_KEY or None)
-pc = Pinecone(api_key=PINECONE_API_KEY or None)
-index = pc.Index(PINECONE_INDEX)
-
-def embed(text: str) -> List[float]:
-    resp = oai.embeddings.create(model=OPENAI_MODEL_EMBED, input=text)
-    return resp.data[0].embedding
-
-def normalize_metadata(md: Dict[str, Any]) -> Dict[str, Any]:
-    safe: Dict[str, Any] = {}
-    for k, v in md.items():
-        if v is None:
-            safe[k] = ""  # no nulls
-        elif isinstance(v, (str, int, float, bool)):
-            safe[k] = v
-        elif isinstance(v, list):
-            safe[k] = [str(x) for x in v][:32]
+def sanitize(md: Dict[str, Any]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k,v in (md or {}).items():
+        if v is None: continue
+        if isinstance(v,(str,int,float,bool)):
+            out[k]=v
+        elif isinstance(v,list):
+            out[k]=[str(x) for x in v if x is not None][:32]
         else:
-            safe[k] = str(v)[:500]
-    return safe
+            out[k]=str(v)[:1000]
+    return out
 
 def main():
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        items = json.load(f)
+    if not os.path.exists(DATA_FILE):
+        raise SystemExit(f"{DATA_FILE} not found. Run the scraper first.")
 
-    vectors = []
-    for it in items:
-        body = " ".join([
-            it.get("title",""),
-            it.get("description",""),
-            " ".join(it.get("bullets", [])[:12]),
-            f"How to use: {it.get('how_to_use','')}",
-            f"Ingredients: {it.get('ingredients','')}",
-        ])[:7000]
+    items = json.load(open(DATA_FILE,"r",encoding="utf-8"))
+    if not items:
+        raise SystemExit("No products found in products.json")
 
+    oai = OpenAI(api_key=OPENAI_API_KEY or None)
+    pc = Pinecone(api_key=PINECONE_API_KEY or None)
+    index = pc.Index(PINECONE_INDEX)
+
+    def embed(text: str) -> List[float]:
+        text = (text or "").replace("\n"," ")
+        return oai.embeddings.create(model=OPENAI_MODEL_EMBED, input=text).data[0].embedding
+
+    batch = []
+    for r in items:
+        body = " ".join(filter(None, [
+            r.get("title",""), r.get("description",""),
+            " ".join(r.get("bullets",[])[:8]),
+            f"How to use: {r.get('how_to_use','')}",
+            f"Ingredients: {r.get('ingredients','')}",
+        ]))[:7000]
         vec = embed(body)
-        md = normalize_metadata({
-            "title": it.get("title",""),
-            "url": it.get("url",""),
-            "how_to_use": it.get("how_to_use",""),
-            "ingredients": it.get("ingredients",""),
-            "bullets": it.get("bullets", []),
+        meta = sanitize({
+            "title": r.get("title",""),
+            "url": r.get("url",""),
+            "how_to_use": r.get("how_to_use",""),
+            "ingredients": r.get("ingredients",""),
+            "bullets": r.get("bullets",[]),
         })
+        batch.append({"id": r.get("id") or r.get("url"), "values": vec, "metadata": meta})
 
-        vectors.append({
-            "id": it.get("id") or it.get("url"),
-            "values": vec,
-            "metadata": md,
-        })
-
-    # Upsert in chunks
-    BATCH = 50
-    for i in range(0, len(vectors), BATCH):
-        chunk = vectors[i:i+BATCH]
+    # upsert in chunks
+    B = 50
+    for i in range(0,len(batch),B):
+        chunk = batch[i:i+B]
         index.upsert(vectors=chunk, namespace=PINECONE_NAMESPACE)
-        print(f"Upserted {len(chunk)} vectors to index '{PINECONE_INDEX}' in namespace '{PINECONE_NAMESPACE}'.")
+        print(f"Upserted {len(chunk)} vectors…")
+
+    print("Done.")
 
 if __name__ == "__main__":
     main()
