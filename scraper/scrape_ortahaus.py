@@ -1,112 +1,136 @@
+#!/usr/bin/env python3
 import os, re, json, time
+from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
 
 BASE_URL = os.getenv("BASE_URL", "https://ortahaus.com")
-
 OUT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data"))
 os.makedirs(OUT_DIR, exist_ok=True)
 OUT_FILE = os.path.join(OUT_DIR, "products.json")
 
+UA = "Mozilla/5.0 (compatible; OrtahausBot/1.0; +https://example.com)"
 session = requests.Session()
-session.headers.update({"User-Agent": "OrtahausBot/1.0 (+https://ortahaus.com)"})
+session.headers.update({"User-Agent": UA})
 
-def get_sitemap_urls():
-    # Try /sitemap.xml then fallback to shopify product sitemap
+def clean(s): return re.sub(r"\s+", " ", (s or "").strip())
+
+def fetch(url):
+    r = session.get(url, timeout=30, allow_redirects=True)
+    r.raise_for_status()
+    return r.text
+
+def get_sitemap_products():
     urls = set()
-    for path in ["/sitemap.xml", "/sitemap_products_1.xml"]:
+    for path in ("/sitemap_products_1.xml", "/sitemap.xml"):
         try:
-            resp = session.get(urljoin(BASE_URL, path), timeout=20)
-            if resp.status_code == 200:
-                soup = BeautifulSoup(resp.text, "xml")
-                for loc in soup.find_all("loc"):
-                    u = loc.get_text(strip=True)
-                    if "/products/" in u:
-                        urls.add(u)
-        except Exception:
-            pass
-    return sorted(urls)
-
-def clean_text(text: str) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip())
-
-def extract_product_fields(html: str, url: str):
-    soup = BeautifulSoup(html, "lxml")
-
-    title = soup.find("title").get_text(strip=True) if soup.find("title") else url
-    # meta description
-    desc = ""
-    md = soup.find("meta", attrs={"name": "description"})
-    if md and md.get("content"):
-        desc = md["content"]
-
-    # Try LD+JSON Product
-    how_to_use, ingredients = "", ""
-    bullets = []
-
-    for script in soup.find_all("script", attrs={"type":"application/ld+json"}):
-        try:
-            data = json.loads(script.string or "{}")
-            if isinstance(data, dict) and data.get("@type") == "Product":
-                ddesc = data.get("description") or ""
-                if ddesc and not desc:
-                    desc = ddesc
-                # nothing else standardized here
+            xml = fetch(urljoin(BASE_URL, path))
+            for m in re.finditer(r"<loc>(.*?)</loc>", xml, re.I):
+                u = m.group(1).strip()
+                if "/products/" in u:
+                    urls.add(u.split("?")[0])
         except Exception:
             continue
+    return urls
 
-    # Try to find sections by headings
-    def section_text(label: str) -> str:
-        # look for heading containing label
-        for hx in soup.find_all(re.compile("^h[1-6]$")):
-            if label.lower() in hx.get_text(" ", strip=True).lower():
+def crawl_collections():
+    seeds = [
+        "/", "/collections/all", "/collections", "/products", "/search?q=products"
+    ]
+    urls = set()
+    for s in seeds:
+        try:
+            html = fetch(urljoin(BASE_URL, s))
+            soup = BeautifulSoup(html, "html.parser")
+            for a in soup.select("a[href*='/products/']"):
+                href = a.get("href", "")
+                if "/products/" in href:
+                    urls.add(urljoin(BASE_URL, href.split("?")[0]))
+        except Exception:
+            pass
+    return urls
+
+def parse_product(url):
+    html = fetch(url)
+    soup = BeautifulSoup(html, "html.parser")
+
+    title = soup.title.get_text(strip=True) if soup.title else url
+    md = soup.find("meta", attrs={"name": "description"})
+    desc = md["content"].strip() if md and md.has_attr("content") else ""
+
+    # ld+json Product (description often better)
+    for tag in soup.find_all("script", attrs={"type":"application/ld+json"}):
+        try:
+            data = json.loads(tag.string or "{}")
+            if isinstance(data, dict) and data.get("@type") in ("Product","product"):
+                desc = data.get("description") or desc
+                title = data.get("name") or title
+        except Exception:
+            pass
+
+    def section(label_words):
+        for h in soup.find_all(re.compile("^h[1-6]$")):
+            htxt = clean(h.get_text(" ", strip=True)).lower()
+            if any(w in htxt for w in label_words):
                 frag = []
-                for sib in hx.find_all_next(["p","li"], limit=8):
-                    t = clean_text(sib.get_text(" ", strip=True))
-                    if t: frag.append(t)
-                return " ".join(frag)[:500]
+                sib = h.find_next_sibling()
+                for _ in range(5):
+                    if not sib:
+                        break
+                    if sib.name in ("p","ul","ol","div","li"):
+                        frag.append(clean(sib.get_text(" ", strip=True)))
+                    sib = sib.find_next_sibling()
+                s = " ".join(x for x in frag if x)
+                if s:
+                    return s[:500]
         return ""
 
-    how_to_use = section_text("How to use") or section_text("How To Use")
-    ingredients = section_text("Ingredients")
+    how_to = section(["how to use","how-to","usage","use"])
+    ingredients = section(["ingredients","what's inside","what’s inside"])
 
-    # Collect a few bullets if present (li items near details)
-    for li in soup.find_all("li"):
-        txt = clean_text(li.get_text(" ", strip=True))
-        if txt and len(bullets) < 8 and 8 <= len(txt) <= 180:
-            bullets.append(txt)
+    bullets = []
+    for li in soup.select("li"):
+        t = clean(li.get_text(" ", strip=True))
+        if 10 <= len(t) <= 180 and any(k in t.lower() for k in ["hold","finish","texture","volume","frizz","shine","powder","spray","clay","cream"]):
+            bullets.append(t)
+    bullets = list(dict.fromkeys(bullets))[:10]
 
-    return {
-        "id": url,
-        "url": url,
-        "title": title,
-        "description": desc,
-        "how_to_use": how_to_use,
-        "ingredients": ingredients,
+    rec = {
+        "id": url, "url": url,
+        "title": clean(title),
+        "description": clean(desc),
+        "how_to_use": clean(how_to),
+        "ingredients": clean(ingredients),
         "bullets": bullets,
         "tags": [],
     }
+    # normalize (no nulls)
+    for k,v in list(rec.items()):
+        if v is None: rec[k] = "" if k != "tags" else []
+    return rec
 
 def main():
-    product_urls = get_sitemap_urls()
-    if not product_urls:
-        print("No product URLs found via sitemap.")
+    urls = set()
+    urls |= get_sitemap_products()
+    if not urls:
+        print("Sitemap empty; crawling collections instead…")
+        urls |= crawl_collections()
+
+    urls = sorted(urls)
+    if not urls:
+        print("No product URLs found via sitemap or crawl.")
         return
 
+    print(f"Found {len(urls)} product URLs")
     out = []
-    print(f"Found {len(product_urls)} product URLs")
-    for i,u in enumerate(product_urls, start=1):
+    for i,u in enumerate(urls,1):
         try:
-            r = session.get(u, timeout=30)
-            if r.status_code == 200:
-                data = extract_product_fields(r.text, u)
-                out.append(data)
-                print(f"[{i}/{len(product_urls)}] scraped:", data["title"][:80])
-            else:
-                print(f"[{i}/{len(product_urls)}] skip {u} status={r.status_code}")
+            rec = parse_product(u)
+            out.append(rec)
+            print(f"[{i}/{len(urls)}] scraped: {rec['title']}")
+            time.sleep(0.2)
         except Exception as e:
-            print(f"[{i}/{len(product_urls)}] error {u} -> {e}")
+            print(f"[{i}/{len(urls)}] ERROR {u} -> {e}")
 
     with open(OUT_FILE, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
