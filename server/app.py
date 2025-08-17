@@ -1,3 +1,4 @@
+# server/app.py
 import os, re, time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -5,6 +6,7 @@ from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ---- Env ----
@@ -26,9 +28,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve /ui from /web
+# Serve /ui and /static from /web
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 INDEX_HTML = WEB_DIR / "index.html"
+app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
 @app.get("/ui", response_class=HTMLResponse)
 def ui():
@@ -80,8 +83,7 @@ def get_session(session_id: Optional[str]) -> Dict[str, Any]:
 # ---- extraction helpers ----
 HAIR_TYPES = ["straight","wavy","curly","coily","fine","thick","thin"]
 CONCERN_SYNONYMS = {
-    "frizz":"frizz",
-    "frizzy":"frizz",
+    "frizz":"frizz", "frizzy":"frizz",
     "volume":"volume","volumize":"volume","lift":"volume",
     "hold":"hold","strong hold":"hold","control":"hold",
     "shine":"shine","gloss":"shine",
@@ -168,7 +170,7 @@ def chat(body: ChatIn, request: Request):
     if results:
         reply_html = product_html(results[0])
     else:
-        # graceful fallback if index is empty or Pinecone blocked
+        # fallback if index empty / Pinecone blocked
         if session["concern"] in ("volume","texture"):
             reply_html = product_html({"title":"Corriedale Powder","url":f"{BASE_URL}/products/corriedale-powder","how_to_use":"Tap a little at roots; tousle for lift.","bullets":["Instant matte volume without stiffness."]})
         elif session["concern"] in ("frizz","definition","hydration") and session["hair_type"] in ("wavy","curly","coily"):
